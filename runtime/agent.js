@@ -2,7 +2,7 @@ const Groq = require("groq-sdk");
 const {
   schemas,
   executeTool
-} = require("../tools");
+} = require("./tools");
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY
