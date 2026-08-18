@@ -18,8 +18,6 @@ const supabase = createClient(url, key, {
     persistSession: false,
     detectSessionInUrl: false
   },
-  // Node.js 20 does not expose a native WebSocket constructor.
-  // Supabase Realtime requires one, so use the ws package explicitly.
   realtime: {
     transport: WebSocket
   }
