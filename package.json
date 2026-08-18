@@ -12,6 +12,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
     "express": "^5.1.0",
-    "groq-sdk": "^0.30.0"
+    "groq-sdk": "^0.30.0",
+    "ws": "^8.18.3"
   }
 }

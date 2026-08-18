@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const WebSocket = require("ws");
 
 const url = process.env.SUPABASE_URL;
 const key =
@@ -16,6 +17,11 @@ const supabase = createClient(url, key, {
     autoRefreshToken: false,
     persistSession: false,
     detectSessionInUrl: false
+  },
+  // Node.js 20 does not expose a native WebSocket constructor.
+  // Supabase Realtime requires one, so use the ws package explicitly.
+  realtime: {
+    transport: WebSocket
   }
 });
 
