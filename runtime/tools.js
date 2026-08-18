@@ -26,28 +26,50 @@ function safePath(relativePath = ".") {
   return target;
 }
 
-async function terminal(command) {
-  return await new Promise((resolve) => {
-    exec(
+async function terminal(command, signal) {
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener("abort", onAbort);
+      fn(value);
+    };
+
+    const child = exec(
       command,
       {
         cwd: WORKSPACE,
         shell: "/bin/sh",
-        timeout: Number(
-          process.env.TERMINAL_TIMEOUT_MS || 30000
-        ),
+        timeout: Number(process.env.TERMINAL_TIMEOUT_MS || 30000),
         maxBuffer: 2 * 1024 * 1024
       },
       (error, stdout, stderr) => {
-        resolve(
-          JSON.stringify({
-            exitCode: error?.code ?? 0,
-            stdout: String(stdout).slice(0, 15000),
-            stderr: String(stderr).slice(0, 15000)
-          })
-        );
+        if (signal?.aborted) {
+          return finish(reject, new Error("Execution force-stopped by Owner."));
+        }
+
+        finish(resolve, JSON.stringify({
+          exitCode: error?.code ?? 0,
+          stdout: String(stdout).slice(0, 15000),
+          stderr: String(stderr).slice(0, 15000)
+        }));
       }
     );
+
+    const onAbort = () => {
+      try { child.kill("SIGTERM"); } catch {}
+      setTimeout(() => {
+        try { if (!settled) child.kill("SIGKILL"); } catch {}
+      }, 1500).unref();
+      finish(reject, new Error("Execution force-stopped by Owner."));
+    };
+
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
 }
 
@@ -243,10 +265,10 @@ const schemas = [
   }
 ];
 
-async function executeTool(name, args) {
+async function executeTool(name, args, options = {}) {
   switch (name) {
     case "terminal":
-      return terminal(args.command);
+      return terminal(args.command, options.signal);
 
     case "list_files":
       return listFiles(args.path || ".");
