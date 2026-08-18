@@ -1,27 +1,22 @@
-# AI Organization — Railway + Groq
+# Groq AI Organization v2
 
-Hierarchy: Level 3 Owner → Level 2 Manager 1/2 → Level 1 Worker 1/2/3.
-All agents use `openai/gpt-oss-120b` by default.
+Two AI agents only:
+- Level 2 Manager
+- Level 1 Worker
+- Level 3 Owner = human
 
-## Railway Variables
+Both use `openai/gpt-oss-120b`.
 
-`GROQ_API_KEY=...`
-`GROQ_MODEL=openai/gpt-oss-120b`
-`MAX_AGENT_TURNS=20`
-`TERMINAL_TIMEOUT_MS=30000`
-`WORKSPACE=/app/workspace`
-`REASONING_EFFORT=medium`
+Worker can use terminal/files in `/app/workspace`. Manager reviews the worker and uses progressive supervision: Observe -> Ask -> Understand -> Correct -> Rework -> Pause -> Escalate.
 
-Railway supplies `PORT` automatically.
+The task runs in blocks of 8 cycles. If the task is not complete after the configured 8 cycles, execution pauses and the Owner is asked whether to continue. Continue grants another 8-cycle block; Stop ends it.
 
-## Deploy
-
-Push the folder to GitHub, create a Railway service from the repo, and add `GROQ_API_KEY` in Variables. Start command is `npm start`.
-
-Workers run shell commands in the service container with `/app/workspace` as cwd. The platform/container remains the isolation boundary.
-
-## Supervision
-
-Observe → Ask → Understand → Correct → Warn → Pause → Escalate.
-
-This is a starter implementation. It keeps state in memory, so a process restart resets agent state. Add authentication and persistent storage before exposing the Owner UI publicly.
+Railway variables:
+```
+GROQ_API_KEY=...
+GROQ_MODEL=openai/gpt-oss-120b
+MAX_AGENT_CYCLES=8
+GROQ_MAX_RETRIES=4
+TERMINAL_TIMEOUT_MS=30000
+WORKSPACE=/app/workspace
+```

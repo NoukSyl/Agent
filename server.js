@@ -1,41 +1,864 @@
-const express=require('express');
-const Groq=require('groq-sdk');
-const {exec}=require('child_process');
-const fs=require('fs/promises');
-const path=require('path');
-const crypto=require('crypto');
-const app=express();
-const PORT=process.env.PORT||3000;
-const MODEL=process.env.GROQ_MODEL||'openai/gpt-oss-120b';
-const WORKSPACE=path.resolve(process.env.WORKSPACE||'/app/workspace');
-const MAX_TURNS=Number(process.env.MAX_AGENT_TURNS||20);
-if(!process.env.GROQ_API_KEY){console.error('Missing GROQ_API_KEY');process.exit(1)}
-const groq=new Groq({apiKey:process.env.GROQ_API_KEY});
-app.use(express.json({limit:'1mb'}));app.use(express.static(path.join(__dirname,'public')));
-const state={paused:false,terminated:false,task:null,events:[],managers:[{id:'manager-1',status:'idle'},{id:'manager-2',status:'idle'}],workers:[{id:'worker-1',status:'idle',manager:'manager-1',warnings:0},{id:'worker-2',status:'idle',manager:'manager-1',warnings:0},{id:'worker-3',status:'idle',manager:'manager-2',warnings:0}]};
-const sessions=new Map();
-async function init(){await fs.mkdir(WORKSPACE,{recursive:true})}
-function log(type,actor,message,extra={}){const e={time:new Date().toISOString(),type,actor,message,...extra};state.events.push(e);if(state.events.length>300)state.events.shift();return e}
-function session(id){if(!sessions.has(id))sessions.set(id,[]);return sessions.get(id)}
-function clean(s,max=12000){s=String(s??'');return s.length>max?s.slice(0,max)+'\n...[truncated]':s}
-function terminal(command){return new Promise(resolve=>{log('tool','worker',`terminal: ${command}`);exec(command,{cwd:WORKSPACE,shell:'/bin/sh',timeout:Number(process.env.TERMINAL_TIMEOUT_MS||30000),maxBuffer:2*1024*1024},(error,stdout,stderr)=>resolve(JSON.stringify({exitCode:error?.code??0,stdout:clean(stdout),stderr:clean(stderr)})))})}
-async function readFile(file){return clean(await fs.readFile(path.resolve(WORKSPACE,file),'utf8'),20000)}
-async function writeFile(file,content){const t=path.resolve(WORKSPACE,file);await fs.mkdir(path.dirname(t),{recursive:true});await fs.writeFile(t,content,'utf8');return `Wrote ${file}`}
-async function listFiles(dir='.'){const es=await fs.readdir(path.resolve(WORKSPACE,dir),{withFileTypes:true});return es.map(e=>`${e.isDirectory()?'DIR ':'FILE'} ${e.name}`).join('\n')}
-const workerTools=[
- {type:'function',function:{name:'terminal',description:'Run a shell command in the agent workspace inside this Railway service container.',parameters:{type:'object',properties:{command:{type:'string'}},required:['command']}}},
- {type:'function',function:{name:'read_file',description:'Read a UTF-8 text file from the workspace.',parameters:{type:'object',properties:{path:{type:'string'}},required:['path']}}},
- {type:'function',function:{name:'write_file',description:'Write a UTF-8 text file in the workspace.',parameters:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content']}}},
- {type:'function',function:{name:'list_files',description:'List files and directories in the workspace.',parameters:{type:'object',properties:{path:{type:'string'}}}}}
-];
-async function runWorker(workerId,managerId,task,history){const w=state.workers.find(x=>x.id===workerId);w.status='working';const messages=[{role:'system',content:`You are ${workerId}, Level 1 Worker. You report to ${managerId}. Execute the assigned task using available tools. Work in the workspace. Never claim completion without checking results. If asked what you are doing, explain the current action and why it contributes to the task.`},...history,{role:'user',content:task}];for(let turn=0;turn<MAX_TURNS;turn++){if(state.terminated)throw new Error('Worker terminated by owner/manager.');if(state.paused){w.status='paused';return 'Worker paused.'}const r=await groq.chat.completions.create({model:MODEL,messages,tools:workerTools,tool_choice:'auto',parallel_tool_calls:false,reasoning_effort:process.env.REASONING_EFFORT||'medium',max_completion_tokens:8192});const msg=r.choices[0].message;messages.push(msg);if(!msg.tool_calls?.length){w.status='review';return msg.content||''}for(const c of msg.tool_calls){let a={};try{a=JSON.parse(c.function.arguments||'{}')}catch{}let out;try{if(c.function.name==='terminal')out=await terminal(a.command);else if(c.function.name==='read_file')out=await readFile(a.path);else if(c.function.name==='write_file')out=await writeFile(a.path,a.content);else if(c.function.name==='list_files')out=await listFiles(a.path||'.');else out='Unknown tool'}catch(e){out=`Tool error: ${e.message}`}messages.push({role:'tool',tool_call_id:c.id,name:c.function.name,content:String(out)})}}w.status='review';return 'Worker reached the configured agent-turn limit.'}
-const managerTools=[
- {type:'function',function:{name:'ask_worker',description:'Ask a worker to explain what it is doing and why the action is relevant. Use this before escalating when a deviation is ambiguous.',parameters:{type:'object',properties:{worker_id:{type:'string'},question:{type:'string'}},required:['worker_id','question']}}},
- {type:'function',function:{name:'request_rework',description:'Tell a worker that its result needs correction.',parameters:{type:'object',properties:{worker_id:{type:'string'},instruction:{type:'string'}},required:['worker_id','instruction']}}},
- {type:'function',function:{name:'pause_worker',description:'Pause a worker after correction is ignored or a clearly serious deviation occurs.',parameters:{type:'object',properties:{worker_id:{type:'string'}},required:['worker_id']}}}
-];
-async function review(managerId,workerId,task,result){const m=state.managers.find(x=>x.id===managerId),w=state.workers.find(x=>x.id===workerId);m.status='reviewing';const messages=[{role:'system',content:`You are ${managerId}, Level 2 Manager supervising ${workerId}. Owner task: ${task}\nWorker result: ${result}\nPolicy: do not stop a worker merely because an action looks unusual. If ambiguous, ask_worker first. If explanation is relevant, allow it. If off-task, request_rework. If repeated correction is ignored or clearly serious, pause_worker. Do not claim PASS without evidence.`}];for(let i=0;i<8;i++){const r=await groq.chat.completions.create({model:MODEL,messages,tools:managerTools,tool_choice:'auto',parallel_tool_calls:false,reasoning_effort:'medium',max_completion_tokens:4096});const msg=r.choices[0].message;messages.push(msg);if(!msg.tool_calls?.length){m.status='idle';return {decision:msg.content||'',status:w.status}}for(const c of msg.tool_calls){let a={};try{a=JSON.parse(c.function.arguments||'{}')}catch{}let out='OK';if(c.function.name==='ask_worker'){log('manager_question',managerId,a.question,{workerId});out=`Clarification requested from ${workerId}: ${a.question}. Continue conservatively pending response.`}else if(c.function.name==='request_rework'){w.warnings++;w.status='rework';log('warning',managerId,a.instruction,{workerId,warning:w.warnings});out=`Rework requested. Warning count: ${w.warnings}.`}else if(c.function.name==='pause_worker'){w.status='paused';log('pause',managerId,'Worker paused after supervisory review.',{workerId});out='Worker is paused.'}messages.push({role:'tool',tool_call_id:c.id,name:c.function.name,content:out})}}m.status='idle';return {decision:'Manager review reached its turn limit.',status:w.status}}
-app.get('/api/state',(req,res)=>res.json({model:MODEL,workspace:WORKSPACE,task:state.task,paused:state.paused,terminated:state.terminated,managers:state.managers,workers:state.workers,events:state.events.slice(-100)}));
-app.post('/api/chat',async(req,res)=>{try{const {sessionId=crypto.randomUUID(),message}=req.body;if(!message)return res.status(400).json({error:'message required'});if(state.terminated)return res.status(409).json({error:'Organization is terminated.'});state.task=message;state.paused=false;log('task','owner',message);const history=session(sessionId);const assignments=[['manager-1','worker-1'],['manager-1','worker-2'],['manager-2','worker-3']];const reports=[];for(const [mid,wid] of assignments){if(state.paused||state.terminated)break;const result=await runWorker(wid,mid,`Owner task: ${message}\nYou are assigned as ${wid}. Execute the useful portion of this task in the workspace.`,history);log('worker_result',wid,result.slice(0,2000));const rv=await review(mid,wid,message,result);reports.push({managerId:mid,workerId:wid,result,review:rv})}history.push({role:'user',content:message});history.push({role:'assistant',content:reports.map(x=>`${x.workerId}: ${x.result}\n${x.managerId}: ${x.review.decision}`).join('\n\n')});res.json({sessionId,model:MODEL,reports})}catch(e){console.error(e);res.status(500).json({error:e.message})}});
-app.post('/api/owner/control',(req,res)=>{const {action,workerId}=req.body;if(action==='pause_worker'||action==='resume_worker'){const w=state.workers.find(x=>x.id===workerId);if(!w)return res.status(404).json({error:'worker not found'});w.status=action==='pause_worker'?'paused':'idle';log('owner_control','owner',`${action} ${workerId}`)}else if(action==='terminate'){state.terminated=true;state.workers.forEach(w=>w.status='terminated');log('owner_control','owner','Terminated organization execution.')}else if(action==='clear_termination'){state.terminated=false;state.workers.forEach(w=>{if(w.status==='terminated')w.status='idle'});log('owner_control','owner','Cleared termination state.')}else return res.status(400).json({error:'unknown action'});res.json({ok:true})});
-init().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`AI organization listening on ${PORT}`)));
+const express = require("express");
+const fs = require("fs/promises");
+const path = require("path");
+
+const {
+  runWorker
+} = require("./runtime/worker");
+
+const {
+  reviewWorker
+} = require("./runtime/manager");
+
+const {
+  createTask,
+  updateTask,
+  addTaskEvent,
+  addDecision,
+  memorySave
+} = require("./runtime/memory");
+
+const PORT =
+  Number(process.env.PORT) || 8080;
+
+const MAX_CYCLES =
+  Number(
+    process.env.MAX_AGENT_CYCLES || 8
+  );
+
+const WORKSPACE =
+  path.resolve(
+    process.env.WORKSPACE ||
+      "/app/workspace"
+  );
+
+const app = express();
+
+app.use(
+  express.json({
+    limit: "1mb"
+  })
+);
+
+app.use(
+  express.static(
+    path.join(
+      __dirname,
+      "public"
+    )
+  )
+);
+
+const state = {
+  taskId: null,
+  task: null,
+  status: "idle",
+
+  cycle: 0,
+
+  awaitingOwner: false,
+
+  ownerDecision: null,
+
+  workerStatus: "idle",
+
+  managerStatus: "idle",
+
+  workerMessage: "",
+
+  managerMessage: "",
+
+  events: []
+};
+
+function pushEvent(
+  type,
+  actor,
+  message
+) {
+  const event = {
+    time:
+      new Date().toISOString(),
+
+    type,
+
+    actor,
+
+    message
+  };
+
+  state.events.push(event);
+
+  if (
+    state.events.length >
+    250
+  ) {
+    state.events.shift();
+  }
+
+  if (state.taskId) {
+    addTaskEvent(
+      state.taskId,
+      actor,
+      type,
+      message,
+      state.cycle
+    ).catch(console.error);
+  }
+
+  return event;
+}
+
+async function runTask(task) {
+  const dbTask =
+    await createTask(task);
+
+  state.taskId =
+    dbTask.id;
+
+  state.task = task;
+
+  state.status =
+    "running";
+
+  state.cycle = 0;
+
+  state.awaitingOwner =
+    false;
+
+  state.ownerDecision =
+    null;
+
+  pushEvent(
+    "task",
+    "owner",
+    task
+  );
+
+  let managerInstruction = "";
+
+  while (
+    state.cycle <
+    MAX_CYCLES
+  ) {
+    if (
+      state.ownerDecision ===
+      "stop"
+    ) {
+      state.status =
+        "stopped";
+
+      await updateTask(
+        state.taskId,
+        {
+          status: "stopped"
+        }
+      );
+
+      pushEvent(
+        "owner_stop",
+        "owner",
+        "Owner stopped execution."
+      );
+
+      return;
+    }
+
+    state.ownerDecision =
+      null;
+
+    state.cycle++;
+
+    await updateTask(
+      state.taskId,
+      {
+        cycle: state.cycle
+      }
+    );
+
+    state.workerStatus =
+      "working";
+
+    pushEvent(
+      "cycle",
+      "system",
+      `Starting cycle ${state.cycle}/${MAX_CYCLES}`
+    );
+
+    const worker =
+      await runWorker({
+        task,
+        managerInstruction,
+        cycle:
+          state.cycle,
+
+        onTool:
+          async (
+            name,
+            args,
+            step
+          ) => {
+            pushEvent(
+              "tool",
+              "worker",
+              `${name} ${JSON.stringify(args)}`
+            );
+          },
+
+        onText:
+          async text => {
+            state.workerMessage =
+              text;
+
+            pushEvent(
+              "worker",
+              "worker",
+              text.slice(0, 5000)
+            );
+          }
+      });
+
+    state.workerStatus =
+      "waiting_review";
+
+    if (!worker.text) {
+      state.workerMessage =
+        "Worker produced no report.";
+    } else {
+      state.workerMessage =
+        worker.text;
+    }
+
+    state.managerStatus =
+      "reviewing";
+
+    const review =
+      await reviewWorker({
+        task,
+
+        workerReport:
+          state.workerMessage,
+
+        cycle:
+          state.cycle
+      });
+
+    state.managerMessage =
+      review.message;
+
+    state.managerStatus =
+      "idle";
+
+    pushEvent(
+      "manager",
+      "manager",
+      `${review.decision}: ${review.message}`
+    );
+
+    await addDecision(
+      state.taskId,
+      "manager",
+      review.decision,
+      review.message
+    );
+
+    if (
+      review.decision ===
+      "PASS"
+    ) {
+      state.status =
+        "completed";
+
+      await updateTask(
+        state.taskId,
+        {
+          status:
+            "completed",
+
+          result:
+            state.workerMessage,
+
+          completed_at:
+            new Date().toISOString()
+        }
+      );
+
+      pushEvent(
+        "completed",
+        "manager",
+        review.message
+      );
+
+      /*
+       * Save a concise durable memory.
+       */
+      try {
+        await memorySave({
+          scope: "task",
+          memory_key:
+            `task-${state.taskId}`,
+
+          content:
+            `Task: ${task}\n\nResult: ${state.workerMessage}\n\nManager: ${review.message}`,
+
+          importance: 6,
+
+          tags: [
+            "completed-task"
+          ]
+        });
+      } catch (error) {
+        pushEvent(
+          "memory_error",
+          "system",
+          error.message
+        );
+      }
+
+      return;
+    }
+
+    if (
+      review.decision ===
+      "PAUSE"
+    ) {
+      state.status =
+        "paused";
+
+      await updateTask(
+        state.taskId,
+        {
+          status: "paused"
+        }
+      );
+
+      pushEvent(
+        "paused",
+        "manager",
+        review.message
+      );
+
+      return;
+    }
+
+    if (
+      review.decision ===
+      "OWNER_INPUT"
+    ) {
+      state.status =
+        "awaiting_owner";
+
+      state.awaitingOwner =
+        true;
+
+      await updateTask(
+        state.taskId,
+        {
+          status:
+            "awaiting_owner"
+        }
+      );
+
+      pushEvent(
+        "owner_input",
+        "manager",
+        review.message
+      );
+
+      return;
+    }
+
+    /*
+     * ASK_WORKER / REWORK
+     *
+     * Give the Worker the Manager's
+     * instruction on the next cycle.
+     */
+    managerInstruction =
+      review.message;
+
+    pushEvent(
+      "manager_instruction",
+      "manager",
+      managerInstruction
+    );
+  }
+
+  /*
+   * Reached maximum cycles.
+   * Do NOT continue automatically.
+   */
+  state.status =
+    "awaiting_owner";
+
+  state.awaitingOwner =
+    true;
+
+  await updateTask(
+    state.taskId,
+    {
+      status:
+        "awaiting_owner"
+    }
+  );
+
+  pushEvent(
+    "cycle_limit",
+    "manager",
+    `Reached ${MAX_CYCLES} cycles. Continue for another ${MAX_CYCLES} cycles?`
+  );
+}
+
+app.get(
+  "/api/state",
+  (req, res) => {
+    res.json({
+      ...state,
+
+      maxCycles:
+        MAX_CYCLES
+    });
+  }
+);
+
+app.post(
+  "/api/task",
+  async (req, res) => {
+    const task =
+      String(
+        req.body?.task || ""
+      ).trim();
+
+    if (!task) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "task required"
+        });
+    }
+
+    if (
+      state.status ===
+      "running"
+    ) {
+      return res
+        .status(409)
+        .json({
+          error:
+            "A task is already running."
+        });
+    }
+
+    /*
+     * Reset runtime state.
+     */
+    state.taskId = null;
+    state.task = task;
+    state.status =
+      "starting";
+    state.cycle = 0;
+    state.awaitingOwner =
+      false;
+    state.ownerDecision =
+      null;
+    state.workerStatus =
+      "idle";
+    state.managerStatus =
+      "idle";
+    state.workerMessage =
+      "";
+    state.managerMessage =
+      "";
+    state.events = [];
+
+    runTask(task).catch(
+      async error => {
+        console.error(
+          error
+        );
+
+        state.status =
+          "error";
+
+        state.awaitingOwner =
+          false;
+
+        pushEvent(
+          "error",
+          "system",
+          error.message
+        );
+
+        if (
+          state.taskId
+        ) {
+          await updateTask(
+            state.taskId,
+            {
+              status:
+                "error",
+
+              result:
+                error.stack
+            }
+          ).catch(
+            console.error
+          );
+        }
+      }
+    );
+
+    res.json({
+      ok: true
+    });
+  }
+);
+
+app.post(
+  "/api/owner/decision",
+  async (req, res) => {
+    const decision =
+      req.body?.decision;
+
+    if (
+      ![
+        "continue",
+        "stop"
+      ].includes(
+        decision
+      )
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "decision must be continue or stop"
+        });
+    }
+
+    if (
+      !state.awaitingOwner
+    ) {
+      return res
+        .status(409)
+        .json({
+          error:
+            "No Owner decision is currently required."
+        });
+    }
+
+    state.awaitingOwner =
+      false;
+
+    state.ownerDecision =
+      decision;
+
+    await addDecision(
+      state.taskId,
+      "owner",
+      decision
+    );
+
+    if (
+      decision ===
+      "stop"
+    ) {
+      state.status =
+        "stopped";
+
+      await updateTask(
+        state.taskId,
+        {
+          status:
+            "stopped"
+        }
+      );
+
+      pushEvent(
+        "owner_decision",
+        "owner",
+        "Owner stopped the task."
+      );
+
+      return res.json({
+        ok: true
+      });
+    }
+
+    /*
+     * Continue another MAX_CYCLES.
+     *
+     * Important:
+     * Reset cycle budget.
+     */
+    state.cycle = 0;
+
+    state.status =
+      "running";
+
+    await updateTask(
+      state.taskId,
+      {
+        status:
+          "running",
+
+        cycle: 0
+      }
+    );
+
+    pushEvent(
+      "owner_decision",
+      "owner",
+      `Owner approved another ${MAX_CYCLES}-cycle block.`
+    );
+
+    /*
+     * Continue in background.
+     */
+    runTaskContinuation().catch(
+      console.error
+    );
+
+    res.json({
+      ok: true
+    });
+  }
+);
+
+async function runTaskContinuation() {
+  /*
+   * Continue using the existing task.
+   *
+   * This duplicates the execution loop
+   * intentionally so Owner approval does
+   * not create a new task.
+   */
+  const task =
+    state.task;
+
+  let managerInstruction =
+    state.managerMessage ||
+    "";
+
+  while (
+    state.cycle <
+    MAX_CYCLES
+  ) {
+    state.cycle++;
+
+    await updateTask(
+      state.taskId,
+      {
+        cycle:
+          state.cycle
+      }
+    );
+
+    const worker =
+      await runWorker({
+        task,
+        managerInstruction,
+        cycle:
+          state.cycle,
+
+        onTool:
+          async (
+            name,
+            args
+          ) => {
+            pushEvent(
+              "tool",
+              "worker",
+              `${name} ${JSON.stringify(args)}`
+            );
+          },
+
+        onText:
+          async text => {
+            state.workerMessage =
+              text;
+
+            pushEvent(
+              "worker",
+              "worker",
+              text.slice(0, 5000)
+            );
+          }
+      });
+
+    state.workerMessage =
+      worker.text;
+
+    const review =
+      await reviewWorker({
+        task,
+
+        workerReport:
+          worker.text,
+
+        cycle:
+          state.cycle
+      });
+
+    state.managerMessage =
+      review.message;
+
+    pushEvent(
+      "manager",
+      "manager",
+      `${review.decision}: ${review.message}`
+    );
+
+    await addDecision(
+      state.taskId,
+      "manager",
+      review.decision,
+      review.message
+    );
+
+    if (
+      review.decision ===
+      "PASS"
+    ) {
+      state.status =
+        "completed";
+
+      await updateTask(
+        state.taskId,
+        {
+          status:
+            "completed",
+
+          result:
+            worker.text,
+
+          completed_at:
+            new Date().toISOString()
+        }
+      );
+
+      pushEvent(
+        "completed",
+        "manager",
+        review.message
+      );
+
+      return;
+    }
+
+    if (
+      review.decision ===
+      "PAUSE"
+    ) {
+      state.status =
+        "paused";
+
+      await updateTask(
+        state.taskId,
+        {
+          status:
+            "paused"
+        }
+      );
+
+      return;
+    }
+
+    if (
+      review.decision ===
+      "OWNER_INPUT"
+    ) {
+      state.status =
+        "awaiting_owner";
+
+      state.awaitingOwner =
+        true;
+
+      await updateTask(
+        state.taskId,
+        {
+          status:
+            "awaiting_owner"
+        }
+      );
+
+      return;
+    }
+
+    managerInstruction =
+      review.message;
+  }
+
+  state.status =
+    "awaiting_owner";
+
+  state.awaitingOwner =
+    true;
+
+  await updateTask(
+    state.taskId,
+    {
+      status:
+        "awaiting_owner"
+    }
+  );
+
+  pushEvent(
+    "cycle_limit",
+    "manager",
+    `Reached ${MAX_CYCLES} cycles again. Continue for another ${MAX_CYCLES} cycles?`
+  );
+}
+
+app.get(
+  "/api/health",
+  (req, res) => {
+    res.json({
+      ok: true,
+
+      model:
+        process.env.GROQ_MODEL ||
+        "openai/gpt-oss-120b",
+
+      supabase:
+        Boolean(
+          process.env.SUPABASE_URL
+        )
+    });
+  }
+);
+
+async function start() {
+  await fs.mkdir(
+    WORKSPACE,
+    {
+      recursive: true
+    }
+  );
+
+  app.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
+      console.log(
+        `AI Organization v3 listening on ${PORT}`
+      );
+
+      console.log(
+        `Model: ${
+          process.env.GROQ_MODEL ||
+          "openai/gpt-oss-120b"
+        }`
+      );
+
+      console.log(
+        `Workspace: ${WORKSPACE}`
+      );
+    }
+  );
+}
+
+start().catch(
+  console.error
+);
