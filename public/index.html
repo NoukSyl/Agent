@@ -370,6 +370,10 @@ function groupEvents(events){
   return blocks;
 }
 
+// Tracks cycle-blocks the user has manually toggled, keyed by header+time,
+// so re-rendering the log every 1.5s doesn't silently reset their open/closed state.
+const cycleOpenOverrides={};
+
 function renderCycleBlock(block,isLast){
   const toolCount=block.items.filter(i=>i.type==="tool").length;
   const repeatedCount=block.items.filter(i=>i.type==="tool_repeated").length;
@@ -389,7 +393,10 @@ function renderCycleBlock(block,isLast){
 
   const badge=`<span class="cnt">${toolCount} call${toolCount===1?"":"s"}${repeatedCount?` \u00b7 ${repeatedCount} repeated`:""}</span>`;
 
-  return `<details class="cycle-block"${isLast?" open":""}><summary><span>${escapeHtml(block.header)}</span>${badge}</summary><div class="cycle-body">${rows||'<div class="log-empty">No tool calls yet.</div>'}</div></details>`;
+  const key=block.header+"|"+block.time;
+  const open=cycleOpenOverrides.hasOwnProperty(key)?cycleOpenOverrides[key]:isLast;
+
+  return `<details class="cycle-block" data-key="${escapeHtml(key)}"${open?" open":""}><summary><span>${escapeHtml(block.header)}</span>${badge}</summary><div class="cycle-body">${rows||'<div class="log-empty">No tool calls yet.</div>'}</div></details>`;
 }
 
 function renderEventBanner(e){
@@ -399,16 +406,44 @@ function renderEventBanner(e){
   return `<div class="event-banner ${style}"><span class="t">${escapeHtml(time)}</span><span class="m">${icon} ${escapeHtml(e.actor)} \u00b7 ${escapeHtml(e.type)}: ${escapeHtml(e.message)}</span></div>`;
 }
 
+function userIsSelectingInside(el){
+  const sel=window.getSelection();
+  if(!sel||sel.isCollapsed||sel.rangeCount===0)return false;
+  return el.contains(sel.anchorNode);
+}
+
 function renderLog(events){
   const el=document.getElementById("log");
+
+  // Don't tear down the DOM while the user is mid-selection inside the log;
+  // skip this render pass and try again next refresh cycle.
+  if(userIsSelectingInside(el))return;
+
+  // Only auto-scroll to the bottom if the user was already at (or very near) the
+  // bottom before this render. Otherwise, leave their scroll position alone.
+  const distanceFromBottom=el.scrollHeight-el.scrollTop-el.clientHeight;
+  const wasNearBottom=distanceFromBottom<24;
+
   if(!events||events.length===0){el.innerHTML='<div class="log-empty">No activity yet.</div>';return}
   const blocks=groupEvents(events);
   el.innerHTML=blocks.map((b,i)=>{
     const isLast=i===blocks.length-1;
     return b.type==="cycle"?renderCycleBlock(b,isLast):renderEventBanner(b.event);
   }).join("");
-  el.scrollTop=el.scrollHeight;
+
+  if(wasNearBottom){
+    el.scrollTop=el.scrollHeight;
+  }
 }
+
+// Record manual open/close toggles (event delegation, bound once).
+document.addEventListener("toggle",(e)=>{
+  const details=e.target;
+  if(details.tagName==="DETAILS"&&details.classList.contains("cycle-block")){
+    const key=details.getAttribute("data-key");
+    if(key)cycleOpenOverrides[key]=details.open;
+  }
+},true);
 
 function latestReasonEvent(events){
   for(let i=events.length-1;i>=0;i--){
