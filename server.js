@@ -1,12 +1,9 @@
 const express = require("express");
-const fs = require("fs/promises");
 const path = require("path");
 
 const {
-  runWorkerA,
-  runWorkerB,
-  WORKER_A_MODEL,
-  WORKER_B_MODEL
+  runWorker,
+  WORKER_MODEL
 } = require("./runtime/worker");
 
 const {
@@ -27,7 +24,6 @@ const {
 
 const PORT = Number(process.env.PORT) || 8080;
 const MAX_CYCLES = Number(process.env.MAX_AGENT_CYCLES || 8);
-const WORKSPACE = path.resolve(process.env.WORKSPACE || "/app/workspace");
 
 const app = express();
 
@@ -41,10 +37,8 @@ const state = {
   cycle: 0,
   awaitingOwner: false,
   ownerDecision: null,
-  workerAStatus: "idle",
-  workerBStatus: "idle",
-  workerAMessage: "",
-  workerBMessage: "",
+  agentStatus: "idle",
+  agentMessage: "",
   events: [],
   abortController: null
 };
@@ -57,15 +51,12 @@ function publicState() {
     cycle: state.cycle,
     awaitingOwner: state.awaitingOwner,
     ownerDecision: state.ownerDecision,
-    workerAStatus: state.workerAStatus,
-    workerBStatus: state.workerBStatus,
-    workerAMessage: state.workerAMessage,
-    workerBMessage: state.workerBMessage,
+    agentStatus: state.agentStatus,
+    agentMessage: state.agentMessage,
     events: state.events,
     maxCycles: MAX_CYCLES,
     models: {
-      workerA: WORKER_A_MODEL,
-      workerB: WORKER_B_MODEL
+      agent: WORKER_MODEL
     },
     authConfigured: authConfigured(),
     forceStoppable: ["starting", "running"].includes(state.status)
@@ -101,33 +92,10 @@ function isForceStopped(error) {
     String(error?.message || "").includes("force-stopped by Owner");
 }
 
-function parsePeerReview(text) {
-  const raw = String(text || "").trim();
-
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      verdict: parsed.verdict === "PASS" ? "PASS" : "FINDINGS",
-      message: parsed.summary || parsed.message || raw,
-      nextAction: parsed.next_action || ""
-    };
-  } catch {}
-
-  const firstLine = raw.split("\n")[0].toUpperCase();
-  const pass = firstLine.includes("PASS") && !firstLine.includes("FINDINGS");
-
-  return {
-    verdict: pass ? "PASS" : "FINDINGS",
-    message: raw,
-    nextAction: ""
-  };
-}
-
 async function finishStopped(reason = "Owner force-stopped execution.") {
   state.status = "stopped";
   state.awaitingOwner = false;
-  state.workerAStatus = "stopped";
-  state.workerBStatus = "stopped";
+  state.agentStatus = "stopped";
 
   if (state.taskId) {
     await updateTask(state.taskId, { status: "stopped" }).catch(console.error);
@@ -137,35 +105,33 @@ async function finishStopped(reason = "Owner force-stopped execution.") {
   pushEvent("force_stop", "owner", reason);
 }
 
-async function completeTask(task, review) {
+async function completeTask(task) {
   state.status = "completed";
   state.awaitingOwner = false;
-  state.workerAStatus = "completed";
-  state.workerBStatus = "completed";
+  state.agentStatus = "completed";
 
   await updateTask(state.taskId, {
     status: "completed",
-    result: state.workerAMessage,
+    result: state.agentMessage,
     completed_at: new Date().toISOString()
   });
 
-  pushEvent("completed", "worker-b", review.message);
+  pushEvent("completed", "agent", state.agentMessage.slice(0, 5000));
 
   try {
     await memorySave({
       scope: "task",
       memory_key: `task-${state.taskId}`,
-      content:
-        `Task: ${task}\n\nWorker A: ${state.workerAMessage}\n\nWorker B review: ${review.message}`,
+      content: `Task: ${task}\n\nAgent: ${state.agentMessage}`,
       importance: 6,
-      tags: ["completed-task", "peer-reviewed"]
+      tags: ["completed-task"]
     });
   } catch (error) {
     pushEvent("memory_error", "system", error.message);
   }
 }
 
-async function runTaskBlock(task, managerFeedback = "") {
+async function runTaskBlock(task, feedback = "") {
   while (state.cycle < MAX_CYCLES) {
     if (state.abortController.signal.aborted) {
       await finishStopped();
@@ -176,87 +142,68 @@ async function runTaskBlock(task, managerFeedback = "") {
     state.cycle++;
 
     await updateTask(state.taskId, { cycle: state.cycle });
-    pushEvent("cycle", "system", `Starting peer cycle ${state.cycle}/${MAX_CYCLES}`);
+    pushEvent(
+      "cycle",
+      "system",
+      `Starting agent cycle ${state.cycle}/${MAX_CYCLES}`
+    );
 
-    state.workerAStatus = "working";
-    state.workerBStatus = "waiting";
+    state.agentStatus = "working";
 
-    const workerA = await runWorkerA({
+    const result = await runWorker({
       task,
-      feedback: managerFeedback,
+      feedback,
       cycle: state.cycle,
       signal: state.abortController.signal,
       onTool: async (name, args, step, model) => {
-        pushEvent("tool", "worker-a", `${name} ${JSON.stringify(args)} [${model}]`);
+        pushEvent(
+          "tool",
+          "agent",
+          `${name} ${JSON.stringify(args)} [${model}]`
+        );
       },
       onText: async text => {
-        state.workerAMessage = text;
-        pushEvent("worker", "worker-a", text.slice(0, 5000));
+        state.agentMessage = text;
+        pushEvent("agent", "agent", text.slice(0, 5000));
       }
     });
 
-    state.workerAMessage = workerA.text || "Worker A produced no report.";
-    state.workerAStatus = "waiting_peer";
-    pushEvent("worker_report", "worker-a", state.workerAMessage.slice(0, 5000));
+    state.agentMessage = result.text || "Agent produced no report.";
+    state.agentStatus = "completed";
+
+    pushEvent(
+      "agent_report",
+      "agent",
+      state.agentMessage.slice(0, 5000)
+    );
 
     if (state.abortController.signal.aborted) {
       await finishStopped();
       return;
     }
 
-    state.workerBStatus = "working";
-    const workerB = await runWorkerB({
-      task,
-      workerAReport: state.workerAMessage,
-      cycle: state.cycle,
-      signal: state.abortController.signal,
-      onTool: async (name, args, step, model) => {
-        pushEvent("tool", "worker-b", `${name} ${JSON.stringify(args)} [${model}]`);
-      },
-      onText: async text => {
-        state.workerBMessage = text;
-        pushEvent("peer_review", "worker-b", text.slice(0, 5000));
-      }
-    });
-
-    state.workerBMessage = workerB.text || "Worker B produced no review.";
-    state.workerBStatus = "reviewed";
-
-    const review = parsePeerReview(state.workerBMessage);
-    await addDecision(
-      state.taskId,
-      "worker-b",
-      review.verdict,
-      review.message
-    );
-
-    if (review.verdict === "PASS") {
-      await completeTask(task, review);
+    // A single agent is responsible for its own verification.
+    // A non-empty final report means the agent completed its pass.
+    if (result.completed) {
+      await completeTask(task);
       return;
     }
 
-    managerFeedback =
-      `WORKER B FOUND FINDINGS:\n${state.workerBMessage}\n\nNEXT ACTION:\n${review.nextAction || "Investigate every finding against the real workspace, fix confirmed defects, and verify the result."}`;
-
-    pushEvent(
-      "peer_feedback",
-      "worker-b",
-      review.message.slice(0, 5000)
-    );
+    feedback =
+      "Continue the task from the current workspace. Review your previous work, identify what remains incomplete, fix it, and verify the result.";
 
     if (state.cycle >= MAX_CYCLES) break;
   }
 
   state.status = "awaiting_owner";
   state.awaitingOwner = true;
-  state.workerAStatus = "waiting_owner";
-  state.workerBStatus = "waiting_owner";
+  state.agentStatus = "waiting_owner";
 
   await updateTask(state.taskId, { status: "awaiting_owner" });
   pushEvent(
     "cycle_limit",
     "system",
-    `Reached ${MAX_CYCLES} peer-review cycles. Owner can continue or stop.`
+    `Reached ${MAX_CYCLES} agent cycles. Owner can continue or stop.`
   );
 }
 
@@ -274,16 +221,15 @@ async function runTask(task, existingTaskId = null) {
   pushEvent("task", "owner", task);
 
   try {
-    await runTaskBlock(task, state.workerBMessage || "");
+    await runTaskBlock(task);
   } catch (error) {
     if (isForceStopped(error)) {
       await finishStopped();
       return;
     }
 
-    console.error(error);
     state.status = "error";
-    state.awaitingOwner = false;
+    state.agentStatus = "error";
     pushEvent("error", "system", error.message);
 
     if (state.taskId) {
@@ -297,36 +243,27 @@ async function runTask(task, existingTaskId = null) {
   }
 }
 
-app.get("/api/auth/status", (req, res) => {
-  res.json({
-    configured: authConfigured(),
-    authenticated: authConfigured() && isAuthenticated(req)
-  });
-});
-
-app.post("/api/auth/login", (req, res) => {
-  if (!authConfigured()) {
-    return res.status(503).json({
-      error: "Set AUTH_USERNAME and AUTH_PASSWORD before using the web UI."
-    });
+// Optional auth endpoints
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const result = await login(
+      String(req.body?.username || ""),
+      String(req.body?.password || "")
+    );
+    res.json(result);
+  } catch (error) {
+    res.status(401).json({ error: error.message });
   }
+});
 
-  const username = String(req.body?.username || "");
-  const password = String(req.body?.password || "");
-
-  if (!login(req, username, password)) {
-    return res.status(401).json({ error: "Invalid username or password." });
+app.post("/api/auth/logout", async (req, res) => {
+  try {
+    await logout(req, res);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  res.json({ ok: true });
 });
-
-app.post("/api/auth/logout", requireAuth, (req, res) => {
-  logout(req);
-  res.json({ ok: true });
-});
-
-app.use("/api", requireAuth);
 
 app.get("/api/state", (req, res) => {
   res.json(publicState());
@@ -336,7 +273,11 @@ app.post("/api/task", async (req, res) => {
   const task = String(req.body?.task || "").trim();
   if (!task) return res.status(400).json({ error: "task required" });
 
-  if (["starting", "running", "stopping", "awaiting_owner"].includes(state.status)) {
+  if (
+    ["starting", "running", "stopping", "awaiting_owner"].includes(
+      state.status
+    )
+  ) {
     return res.status(409).json({ error: "A task is already active." });
   }
 
@@ -346,15 +287,14 @@ app.post("/api/task", async (req, res) => {
   state.cycle = 0;
   state.awaitingOwner = false;
   state.ownerDecision = null;
-  state.workerAStatus = "idle";
-  state.workerBStatus = "idle";
-  state.workerAMessage = "";
-  state.workerBMessage = "";
+  state.agentStatus = "idle";
+  state.agentMessage = "";
   state.events = [];
 
   runTask(task).catch(async error => {
     console.error(error);
     state.status = "error";
+    state.agentStatus = "error";
     pushEvent("error", "system", error.message);
   });
 
@@ -364,11 +304,15 @@ app.post("/api/task", async (req, res) => {
 app.post("/api/owner/decision", async (req, res) => {
   const decision = req.body?.decision;
   if (!["continue", "stop"].includes(decision)) {
-    return res.status(400).json({ error: "decision must be continue or stop" });
+    return res.status(400).json({
+      error: "decision must be continue or stop"
+    });
   }
 
   if (!state.awaitingOwner) {
-    return res.status(409).json({ error: "No Owner decision is currently required." });
+    return res.status(409).json({
+      error: "No Owner decision is currently required."
+    });
   }
 
   if (decision === "stop") {
@@ -382,20 +326,38 @@ app.post("/api/owner/decision", async (req, res) => {
   state.ownerDecision = "continue";
   state.cycle = 0;
   state.status = "running";
-  state.workerAStatus = "idle";
-  state.workerBStatus = "idle";
+  state.agentStatus = "idle";
 
-  await updateTask(state.taskId, { status: "running", cycle: 0 });
-  pushEvent("owner_decision", "owner", `Owner approved another ${MAX_CYCLES}-cycle block.`);
+  await updateTask(state.taskId, {
+    status: "running",
+    cycle: 0
+  });
 
-  if (!state.abortController) state.abortController = new AbortController();
+  pushEvent(
+    "owner_decision",
+    "owner",
+    `Owner approved another ${MAX_CYCLES}-cycle block.`
+  );
 
-  runTaskBlock(state.task, state.workerBMessage || "")
+  if (!state.abortController) {
+    state.abortController = new AbortController();
+  }
+
+  runTaskBlock(
+    state.task,
+    "Continue from the current workspace. Re-check your previous work and complete anything still missing."
+  )
     .catch(async error => {
       if (isForceStopped(error)) return finishStopped();
+
       state.status = "error";
+      state.agentStatus = "error";
       pushEvent("error", "system", error.message);
-      await updateTask(state.taskId, { status: "error", result: error.stack }).catch(console.error);
+
+      await updateTask(state.taskId, {
+        status: "error",
+        result: error.stack
+      }).catch(console.error);
     })
     .finally(() => {
       state.abortController = null;
@@ -405,13 +367,23 @@ app.post("/api/owner/decision", async (req, res) => {
 });
 
 app.post("/api/force-stop", async (req, res) => {
-  if (!["starting", "running"].includes(state.status) || !state.abortController) {
-    return res.status(409).json({ error: "No running task can be force-stopped." });
+  if (
+    !["starting", "running"].includes(state.status) ||
+    !state.abortController
+  ) {
+    return res.status(409).json({
+      error: "No running task can be force-stopped."
+    });
   }
 
   state.status = "stopping";
   state.awaitingOwner = false;
-  pushEvent("force_stop_requested", "owner", "Force stop requested from web UI.");
+  pushEvent(
+    "force_stop_requested",
+    "owner",
+    "Force stop requested from web UI."
+  );
+
   state.abortController.abort();
 
   res.json({ ok: true });
@@ -423,8 +395,6 @@ app.get("/", (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`AI Organization listening on :${PORT}`);
-  console.log(`Workspace: ${WORKSPACE}`);
-  console.log(`Worker A: ${WORKER_A_MODEL}`);
-  console.log(`Worker B: ${WORKER_B_MODEL}`);
+  console.log(`Agent model: ${WORKER_MODEL}`);
   console.log(`Web auth configured: ${authConfigured()}`);
 });

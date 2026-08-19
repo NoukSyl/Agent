@@ -33,8 +33,7 @@
 <div class="panel"><h3>Status</h3><div class="status" id="status">Loading...</div></div>
 
 <div class="grid">
-<div class="panel"><h3>Worker A</h3><div id="workerA">Idle</div></div>
-<div class="panel"><h3>Worker B · Peer Critic</h3><div id="workerB">Idle</div></div>
+<div class="panel"><h3>AI Agent</h3><div id="workerA">Idle</div></div>
 </div>
 
 <div class="panel owner" id="owner">
@@ -54,7 +53,7 @@ function showLogin(){document.getElementById("loginView").style.display="block";
 function showApp(){document.getElementById("loginView").style.display="none";document.getElementById("appView").style.display="block"}
 async function login(event){event.preventDefault();const error=document.getElementById("loginError");error.textContent="";try{await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})});showApp();refresh()}catch(e){error.textContent=e.message}}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{showLogin()}}
-async function refresh(){try{const data=await api("/api/state");showApp();document.getElementById("status").innerHTML=`Status: <b>${escapeHtml(data.status)}</b><br>Cycle: <b>${data.cycle}/${data.maxCycles}</b><br>Worker A model: <b>${escapeHtml(data.models.workerA)}</b><br>Worker B model: <b>${escapeHtml(data.models.workerB)}</b>`;document.getElementById("workerA").innerHTML=`<b>${escapeHtml(data.workerAStatus)}</b><br><br>${escapeHtml(data.workerAMessage)}`;document.getElementById("workerB").innerHTML=`<b>${escapeHtml(data.workerBStatus)}</b><br><br>${escapeHtml(data.workerBMessage)}`;document.getElementById("owner").style.display=data.awaitingOwner?"block":"none";document.getElementById("forceStop").style.display=data.forceStoppable?"inline-block":"none";document.getElementById("log").textContent=data.events.map(e=>`[${new Date(e.time).toLocaleTimeString()}] ${e.type}/${e.actor}: ${e.message}`).join("\n")}catch(e){if(!e.message.includes("Authentication required"))document.getElementById("status").textContent=e.message}}
+async function refresh(){try{const data=await api("/api/state");showApp();document.getElementById("status").innerHTML=`Status: <b>${escapeHtml(data.status)}</b><br>Cycle: <b>${data.cycle}/${data.maxCycles}</b><br>Agent model: <b>${escapeHtml(data.models.agent)}</b>`;document.getElementById("workerA").innerHTML=`<b>${escapeHtml(data.agentStatus)}</b><br><br>${escapeHtml(data.agentMessage)}`;document.getElementById("owner").style.display=data.awaitingOwner?"block":"none";document.getElementById("forceStop").style.display=data.forceStoppable?"inline-block":"none";document.getElementById("log").textContent=data.events.map(e=>`[${new Date(e.time).toLocaleTimeString()}] ${e.type}/${e.actor}: ${e.message}`).join("\n")}catch(e){if(!e.message.includes("Authentication required"))document.getElementById("status").textContent=e.message}}
 async function startTask(){const task=document.getElementById("task").value.trim();if(!task)return;try{await api("/api/task",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task})});refresh()}catch(e){alert(e.message)}}
 async function decision(value){try{await api("/api/owner/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:value})});refresh()}catch(e){alert(e.message)}}
 async function forceStop(){if(!confirm("Force stop the current task? The active model request and running terminal command will be cancelled when possible."))return;try{await api("/api/force-stop",{method:"POST"});refresh()}catch(e){alert(e.message)}}
