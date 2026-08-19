@@ -1,64 +1,368 @@
 <!doctype html>
-<html>
+<html lang="th">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Peer Organization</title>
+<title>Operator Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box}body{margin:0;background:#0b0f14;color:#e8edf3;font-family:system-ui,-apple-system,sans-serif}header{height:60px;padding:0 18px;border-bottom:1px solid #252c35;display:flex;align-items:center;justify-content:space-between}main{max-width:1100px;margin:auto;padding:20px}.panel{border:1px solid #29313b;background:#121820;border-radius:14px;padding:15px;margin-bottom:15px}textarea,input{width:100%;background:#0d1218;color:white;border:1px solid #2b3440;border-radius:10px;padding:12px;font:inherit}textarea{min-height:120px;resize:vertical}input{margin-bottom:10px}button{border:0;border-radius:9px;padding:10px 15px;background:#2764d8;color:white;cursor:pointer;margin:6px 6px 0 0}button.stop{background:#9b3b3b}button.secondary{background:#394554}.owner{display:none;border:1px solid #80651e;background:#1c180d}.status{line-height:1.8;font-size:14px}.log{max-height:420px;overflow:auto;white-space:pre-wrap;font-size:12px;color:#aeb8c5}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#202a35;font-size:12px}.login{max-width:420px;margin:12vh auto}.danger{display:none}.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}@media(max-width:760px){.grid{grid-template-columns:1fr}}
+:root{
+  --bg:#15140f;
+  --panel:#1b1a14;
+  --panel-raised:#201f18;
+  --line:#33301f;
+  --line-bright:#4a4530;
+  --ink:#eae3d1;
+  --muted:#8c8672;
+  --brass:#c9a227;
+  --amber:#ff9635;
+  --green:#7fd858;
+  --red:#ff5b48;
+  --font-display:"Big Shoulders Display",sans-serif;
+  --font-ui:"Space Grotesk",sans-serif;
+  --font-mono:"IBM Plex Mono",monospace;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgba(201,162,39,0.08), transparent 60%),
+    var(--bg);
+  color:var(--ink);
+  font-family:var(--font-ui);
+  min-height:100vh;
+}
+::selection{background:var(--brass);color:#15140f}
+
+/* ---------- header ---------- */
+header{
+  height:66px;padding:0 22px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;justify-content:space-between;
+  background:linear-gradient(180deg,#1a190f,#15140f);
+}
+.brand{display:flex;align-items:center;gap:12px}
+.brand .lamp{width:11px;height:11px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 3px rgba(255,255,255,0.03) inset;flex:none}
+.brand .lamp.on{background:var(--green);box-shadow:0 0 10px 2px rgba(127,216,88,0.55)}
+.brand h1{
+  font-family:var(--font-display);font-weight:700;letter-spacing:.04em;
+  font-size:22px;margin:0;text-transform:uppercase;
+}
+.brand .sub{font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;color:var(--muted);text-transform:uppercase;margin-top:2px}
+.header-right{display:flex;align-items:center;gap:10px}
+.model-chip{
+  font-family:var(--font-mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--line);padding:6px 10px;border-radius:6px;background:var(--panel);
+  letter-spacing:.03em;
+}
+.model-chip b{color:var(--ink);font-weight:600}
+
+/* ---------- shared panel ---------- */
+main{max-width:920px;margin:0 auto;padding:26px 20px 60px}
+.panel{
+  border:1px solid var(--line);background:var(--panel);border-radius:4px;
+  padding:18px 20px;margin-bottom:16px;position:relative;
+}
+.panel::before{
+  content:"";position:absolute;top:0;left:14px;right:14px;height:1px;
+  background:linear-gradient(90deg,transparent,var(--line-bright),transparent);
+}
+.eyebrow{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.18em;color:var(--muted);
+  text-transform:uppercase;margin:0 0 12px;display:flex;align-items:center;justify-content:space-between;
+}
+
+/* ---------- login ---------- */
+.login-wrap{max-width:380px;margin:14vh auto 0}
+.login-wrap .lamp-big{
+  width:14px;height:14px;border-radius:50%;background:var(--amber);margin:0 auto 18px;
+  box-shadow:0 0 16px 3px rgba(255,150,53,0.5);
+}
+.login-wrap h2{
+  font-family:var(--font-display);text-transform:uppercase;letter-spacing:.03em;
+  text-align:center;margin:0 0 6px;font-size:26px;font-weight:700;
+}
+.login-wrap p{text-align:center;color:var(--muted);font-size:13px;margin:0 0 22px}
+label{display:block;font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase;margin:0 0 6px}
+.field{margin-bottom:14px}
+input,textarea{
+  width:100%;background:#0f0e0a;color:var(--ink);border:1px solid var(--line);
+  border-radius:4px;padding:11px 12px;font:14px var(--font-ui);outline:none;
+  transition:border-color .15s;
+}
+input:focus,textarea:focus{border-color:var(--brass)}
+textarea{min-height:110px;resize:vertical;font-family:var(--font-mono);font-size:13px;line-height:1.5}
+#loginError{color:var(--red);font-size:12.5px;margin-top:10px;min-height:1em;font-family:var(--font-mono)}
+
+/* ---------- buttons ---------- */
+button{
+  border:0;border-radius:4px;padding:11px 18px;background:var(--brass);color:#171610;
+  cursor:pointer;font-family:var(--font-ui);font-weight:600;font-size:13px;
+  letter-spacing:.02em;transition:filter .15s, transform .05s;
+}
+button:hover{filter:brightness(1.1)}
+button:active{transform:translateY(1px)}
+button.full{width:100%}
+button.secondary{background:transparent;color:var(--muted);border:1px solid var(--line)}
+button.secondary:hover{color:var(--ink);border-color:var(--line-bright)}
+button.kill{
+  background:#241611;color:var(--red);border:1px solid #5a2a22;
+  display:none;margin-top:10px;
+}
+button.kill:hover{background:#2c1712;border-color:var(--red)}
+button.owner-continue{background:var(--green);color:#0f1a0a}
+button.owner-stop{background:#241611;color:var(--red);border:1px solid #5a2a22}
+
+/* ---------- task strip ---------- */
+.task-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
+.task-head h3{font-family:var(--font-display);font-weight:700;text-transform:uppercase;letter-spacing:.03em;margin:0 0 12px;font-size:19px}
+
+/* ---------- instrument row ---------- */
+.gauges{display:grid;grid-template-columns:1.2fr 1fr 1.3fr;gap:14px;margin-bottom:16px}
+@media(max-width:700px){.gauges{grid-template-columns:1fr}}
+.gauge{border:1px solid var(--line);background:var(--panel-raised);border-radius:4px;padding:14px 16px}
+.gauge .eyebrow{margin-bottom:8px}
+.status-readout{display:flex;align-items:center;gap:9px}
+.status-readout .lamp{width:10px;height:10px;border-radius:50%;flex:none;background:var(--muted)}
+.status-readout .lamp.amber{background:var(--amber);box-shadow:0 0 9px 2px rgba(255,150,53,0.55);animation:pulse 1.6s ease-in-out infinite}
+.status-readout .lamp.green{background:var(--green);box-shadow:0 0 9px 2px rgba(127,216,88,0.5)}
+.status-readout .lamp.red{background:var(--red);box-shadow:0 0 9px 2px rgba(255,91,72,0.55)}
+.status-readout span{font-family:var(--font-mono);font-size:15px;text-transform:uppercase;letter-spacing:.04em}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.status-readout .lamp.amber{animation:none}}
+
+.dial{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+.dial i{width:9px;height:16px;border-radius:1px;background:#2a281c;display:inline-block}
+.dial i.filled{background:var(--brass)}
+.dial-num{font-family:var(--font-mono);font-size:13px;color:var(--muted);margin-left:4px}
+
+.model-readout{font-family:var(--font-mono);font-size:13px;line-height:1.6;color:var(--ink);word-break:break-all}
+.model-readout .k{color:var(--muted)}
+
+/* ---------- owner alert ---------- */
+.owner{
+  display:none;border:1px solid #5a3f14;background:#20180c;
+  box-shadow:0 0 0 1px rgba(255,150,53,0.08) inset;
+}
+.owner .eyebrow{color:var(--amber)}
+.owner h3{font-family:var(--font-display);font-weight:700;text-transform:uppercase;margin:0 0 6px;font-size:18px;letter-spacing:.02em}
+.owner p{color:var(--muted);font-size:13px;margin:0 0 14px;line-height:1.5}
+.owner .row{display:flex;gap:10px;flex-wrap:wrap}
+
+/* ---------- log / teletype ---------- */
+.log{
+  max-height:400px;overflow:auto;font-family:var(--font-mono);font-size:12.5px;
+  line-height:1.9;background:#0f0e0a;border:1px solid var(--line);border-radius:4px;
+  padding:12px 14px;
+}
+.log-line{white-space:pre-wrap;word-break:break-word;border-bottom:1px solid #201f16;padding:3px 0}
+.log-line:last-child{border-bottom:none}
+.log-line .t{color:var(--muted);margin-right:8px}
+.log-line .a{margin-right:6px;font-weight:600}
+.log-line .a.agent{color:var(--brass)}
+.log-line .a.owner{color:var(--green)}
+.log-line .a.system{color:var(--red)}
+.log-empty{color:var(--muted);font-style:italic}
+
+.footnote{font-family:var(--font-mono);font-size:10.5px;color:var(--muted);text-align:center;margin-top:18px;letter-spacing:.06em}
 </style>
 </head>
 <body>
-<header><b>AI Peer Organization</b><span class="badge">TWO INDEPENDENT WORKERS</span></header>
 
-<section id="loginView" class="login panel">
-<h2>Owner Login</h2>
-<p>Authentication is required to control the agents.</p>
-<form onsubmit="login(event)">
-<input id="username" autocomplete="username" placeholder="Username" required>
-<input id="password" type="password" autocomplete="current-password" placeholder="Password" required>
-<button type="submit">Login</button>
-</form>
-<div id="loginError"></div>
+<header>
+  <div class="brand">
+    <span class="lamp" id="connLamp"></span>
+    <div>
+      <h1>Operator Console</h1>
+      <div class="sub">Single-agent execution &middot; owner supervised</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="model-chip" id="modelChip" style="display:none">Model &middot; <b id="modelChipVal">—</b></span>
+    <button class="secondary" id="logoutBtn" style="display:none" onclick="logout()">Logout</button>
+  </div>
+</header>
+
+<section id="loginView">
+  <div class="login-wrap panel">
+    <div class="lamp-big"></div>
+    <h2>Owner Access</h2>
+    <p>Authenticate to dispatch and supervise the agent.</p>
+    <form onsubmit="login(event)">
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button class="full" type="submit">Authenticate</button>
+      <div id="loginError"></div>
+    </form>
+  </div>
 </section>
 
 <main id="appView" style="display:none">
-<div class="panel">
-<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h3>Task</h3><button class="secondary" onclick="logout()">Logout</button></div>
-<textarea id="task" placeholder="Tell the two AI workers what to do..."></textarea>
-<button onclick="startTask()">Start Task</button>
-<button id="forceStop" class="stop danger" onclick="forceStop()">FORCE STOP</button>
-</div>
 
-<div class="panel"><h3>Status</h3><div class="status" id="status">Loading...</div></div>
+  <div class="panel">
+    <div class="task-head"><h3>Dispatch</h3></div>
+    <textarea id="task" placeholder="Describe the task for the agent to execute..."></textarea>
+    <button onclick="startTask()">Dispatch Task</button>
+    <button id="forceStop" class="kill" onclick="forceStop()">■ Force Stop</button>
+  </div>
 
-<div class="grid">
-<div class="panel"><h3>AI Agent</h3><div id="workerA">Idle</div></div>
-</div>
+  <div class="gauges">
+    <div class="gauge">
+      <div class="eyebrow">Status</div>
+      <div class="status-readout"><span class="lamp" id="statusLamp"></span><span id="statusText">—</span></div>
+    </div>
+    <div class="gauge">
+      <div class="eyebrow">Cycle</div>
+      <div class="dial" id="cycleDial"></div>
+    </div>
+    <div class="gauge">
+      <div class="eyebrow">Agent</div>
+      <div class="model-readout" id="agentReadout"><span class="k">state</span> —</div>
+    </div>
+  </div>
 
-<div class="panel owner" id="owner">
-<h3>Owner decision required</h3>
-<p>The peer workers reached the cycle budget without a PASS.</p>
-<button onclick="decision('continue')">Continue another block</button>
-<button class="stop" onclick="decision('stop')">Stop</button>
-</div>
+  <div class="panel owner" id="owner">
+    <div class="eyebrow">Owner decision required</div>
+    <h3>Cycle budget reached</h3>
+    <p>The agent used its available cycles without reaching a confirmed pass. Choose how to proceed.</p>
+    <div class="row">
+      <button class="owner-continue" onclick="decision('continue')">Continue another block</button>
+      <button class="owner-stop" onclick="decision('stop')">Stop</button>
+    </div>
+  </div>
 
-<div class="panel"><h3>Activity</h3><div class="log" id="log">Loading...</div></div>
+  <div class="panel">
+    <div class="eyebrow">Activity</div>
+    <div class="log" id="log"><div class="log-empty">Loading…</div></div>
+  </div>
+
+  <div class="footnote">FORCE STOP cancels the active request and any running terminal command when possible</div>
 </main>
 
 <script>
 function escapeHtml(value){return String(value||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}
-async function api(url, options={}){const response=await fetch(url,options);let data={};try{data=await response.json()}catch{}if(response.status===401){showLogin();throw new Error("Authentication required")};if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);return data}
-function showLogin(){document.getElementById("loginView").style.display="block";document.getElementById("appView").style.display="none"}
-function showApp(){document.getElementById("loginView").style.display="none";document.getElementById("appView").style.display="block"}
-async function login(event){event.preventDefault();const error=document.getElementById("loginError");error.textContent="";try{await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})});showApp();refresh()}catch(e){error.textContent=e.message}}
+
+async function api(url, options={}){
+  const response=await fetch(url,options);
+  let data={};
+  try{data=await response.json()}catch{}
+  if(response.status===401){showLogin();throw new Error("Authentication required")}
+  if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);
+  return data;
+}
+
+function showLogin(){
+  document.getElementById("loginView").style.display="block";
+  document.getElementById("appView").style.display="none";
+  document.getElementById("logoutBtn").style.display="none";
+  document.getElementById("modelChip").style.display="none";
+  document.getElementById("connLamp").classList.remove("on");
+}
+function showApp(){
+  document.getElementById("loginView").style.display="none";
+  document.getElementById("appView").style.display="block";
+  document.getElementById("logoutBtn").style.display="inline-block";
+  document.getElementById("modelChip").style.display="inline-flex";
+  document.getElementById("connLamp").classList.add("on");
+}
+
+async function login(event){
+  event.preventDefault();
+  const error=document.getElementById("loginError");
+  error.textContent="";
+  try{
+    await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("username").value,password:document.getElementById("password").value})});
+    showApp();refresh();
+  }catch(e){error.textContent=e.message}
+}
 async function logout(){try{await api("/api/auth/logout",{method:"POST"})}finally{showLogin()}}
-async function refresh(){try{const data=await api("/api/state");showApp();document.getElementById("status").innerHTML=`Status: <b>${escapeHtml(data.status)}</b><br>Cycle: <b>${data.cycle}/${data.maxCycles}</b><br>Agent model: <b>${escapeHtml(data.models.agent)}</b>`;document.getElementById("workerA").innerHTML=`<b>${escapeHtml(data.agentStatus)}</b><br><br>${escapeHtml(data.agentMessage)}`;document.getElementById("owner").style.display=data.awaitingOwner?"block":"none";document.getElementById("forceStop").style.display=data.forceStoppable?"inline-block":"none";document.getElementById("log").textContent=data.events.map(e=>`[${new Date(e.time).toLocaleTimeString()}] ${e.type}/${e.actor}: ${e.message}`).join("\n")}catch(e){if(!e.message.includes("Authentication required"))document.getElementById("status").textContent=e.message}}
-async function startTask(){const task=document.getElementById("task").value.trim();if(!task)return;try{await api("/api/task",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task})});refresh()}catch(e){alert(e.message)}}
-async function decision(value){try{await api("/api/owner/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:value})});refresh()}catch(e){alert(e.message)}}
-async function forceStop(){if(!confirm("Force stop the current task? The active model request and running terminal command will be cancelled when possible."))return;try{await api("/api/force-stop",{method:"POST"});refresh()}catch(e){alert(e.message)}}
-async function boot(){try{const s=await api("/api/auth/status");if(s.authenticated){showApp();refresh()}else showLogin()}catch(e){showLogin()}}
-boot();setInterval(()=>{if(document.getElementById("appView").style.display!=="none")refresh()},1500);
+
+function statusLampClass(status){
+  if(["running","starting"].includes(status))return "amber";
+  if(["awaiting_owner","stopping"].includes(status))return "amber";
+  if(["completed"].includes(status))return "green";
+  if(["error","stopped"].includes(status))return "red";
+  return "";
+}
+
+function renderCycleDial(cycle,max){
+  const el=document.getElementById("cycleDial");
+  const total=Math.max(max||0,cycle||0,1);
+  let html="";
+  for(let i=0;i<total;i++){
+    html+=`<i class="${i<cycle?"filled":""}"></i>`;
+  }
+  html+=`<span class="dial-num">${cycle}/${max}</span>`;
+  el.innerHTML=html;
+}
+
+function renderLog(events){
+  const el=document.getElementById("log");
+  if(!events||events.length===0){el.innerHTML='<div class="log-empty">No activity yet.</div>';return}
+  el.innerHTML=events.map(e=>{
+    const time=new Date(e.time).toLocaleTimeString();
+    const actorClass=["agent","owner","system"].includes(e.actor)?e.actor:"system";
+    return `<div class="log-line"><span class="t">${escapeHtml(time)}</span><span class="a ${actorClass}">${escapeHtml(e.actor)}</span><span class="m">${escapeHtml(e.type)}: ${escapeHtml(e.message)}</span></div>`;
+  }).join("");
+  el.scrollTop=el.scrollHeight;
+}
+
+async function refresh(){
+  try{
+    const data=await api("/api/state");
+    showApp();
+
+    document.getElementById("modelChipVal").textContent=data.models.agent;
+
+    document.getElementById("statusText").textContent=data.status;
+    document.getElementById("statusLamp").className="lamp "+statusLampClass(data.status);
+
+    renderCycleDial(data.cycle,data.maxCycles);
+
+    document.getElementById("agentReadout").innerHTML=
+      `<span class="k">state</span> ${escapeHtml(data.agentStatus)}<br>`+
+      (data.agentMessage?escapeHtml(data.agentMessage.slice(0,220)):'<span class="k">—</span>');
+
+    document.getElementById("owner").style.display=data.awaitingOwner?"block":"none";
+    document.getElementById("forceStop").style.display=data.forceStoppable?"inline-block":"none";
+
+    renderLog(data.events);
+  }catch(e){
+    if(!e.message.includes("Authentication required")){
+      document.getElementById("statusText").textContent="error";
+    }
+  }
+}
+
+async function startTask(){
+  const task=document.getElementById("task").value.trim();
+  if(!task)return;
+  try{await api("/api/task",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({task})});refresh()}
+  catch(e){alert(e.message)}
+}
+async function decision(value){
+  try{await api("/api/owner/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:value})});refresh()}
+  catch(e){alert(e.message)}
+}
+async function forceStop(){
+  if(!confirm("Force stop the current task? The active model request and running terminal command will be cancelled when possible."))return;
+  try{await api("/api/force-stop",{method:"POST"});refresh()}
+  catch(e){alert(e.message)}
+}
+
+async function boot(){
+  try{const s=await api("/api/auth/status");if(s.authenticated){showApp();refresh()}else showLogin()}
+  catch(e){showLogin()}
+}
+boot();
+setInterval(()=>{if(document.getElementById("appView").style.display!=="none")refresh()},1500);
 </script>
 </body>
 </html>
