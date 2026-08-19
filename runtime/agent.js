@@ -9,8 +9,12 @@ const DEFAULT_MODEL =
   process.env.GROQ_MODEL ||
   "openai/gpt-oss-120b";
 
+// 8 was too tight: a trivial task already spends ~8 steps just
+// listing/reading files before it can act, so cycles always ended
+// in "reached tool-step limit" instead of finishing. Raised default,
+// still fully overridable via env.
 const MAX_TOOL_STEPS = Number(
-  process.env.MAX_TOOL_STEPS || 8
+  process.env.MAX_TOOL_STEPS || 16
 );
 
 function sleep(ms) {
@@ -21,6 +25,10 @@ function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw new Error("Execution force-stopped by Owner.");
   }
+}
+
+function callSignature(name, args) {
+  return `${name}:${JSON.stringify(args)}`;
 }
 
 async function completion(body, signal) {
@@ -56,6 +64,7 @@ async function runAgent({
   messages,
   model = DEFAULT_MODEL,
   onTool,
+  onToolResult,
   onText,
   signal
 }) {
@@ -63,6 +72,13 @@ async function runAgent({
     { role: "system", content: system },
     ...messages
   ];
+
+  // In-cycle repetition guard: if the model calls the exact same tool
+  // with the exact same arguments more than once in this cycle, don't
+  // re-run it — hand back the cached result plus a nudge, so a stuck
+  // model gets steered instead of silently burning steps re-doing work.
+  const seenCalls = new Map();
+  const toolTrace = [];
 
   for (let step = 1; step <= MAX_TOOL_STEPS; step++) {
     throwIfAborted(signal);
@@ -101,11 +117,33 @@ async function runAgent({
 
         if (onTool) await onTool(name, args, step, model);
 
+        const signature = callSignature(name, args);
+        const repeated = seenCalls.has(signature);
+
         let result;
-        try {
-          result = await executeTool(name, args, { signal });
-        } catch (error) {
-          result = `Tool error: ${error.message}`;
+        if (repeated) {
+          result = `[REPEATED CALL — not re-run] You already called this exact tool with these exact arguments earlier in this cycle. Previous result:\n${seenCalls.get(
+            signature
+          )}\n\nDo not repeat identical calls. Use the result above, try a different approach, or report what is blocking you.`;
+        } else {
+          try {
+            result = await executeTool(name, args, { signal });
+          } catch (error) {
+            result = `Tool error: ${error.message}`;
+          }
+          seenCalls.set(signature, String(result).slice(0, 2000));
+        }
+
+        toolTrace.push({
+          step,
+          name,
+          args,
+          result: String(result).slice(0, 4000),
+          repeated
+        });
+
+        if (onToolResult) {
+          await onToolResult(name, args, result, step, model, repeated);
         }
 
         conversation.push({
@@ -135,7 +173,8 @@ async function runAgent({
       text,
       steps: step,
       model,
-      messages: conversation
+      messages: conversation,
+      toolTrace
     };
   }
 
@@ -144,7 +183,8 @@ async function runAgent({
     text: "Agent reached the tool-step limit for this cycle.",
     steps: MAX_TOOL_STEPS,
     model,
-    messages: conversation
+    messages: conversation,
+    toolTrace
   };
 }
 

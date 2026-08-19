@@ -40,7 +40,14 @@ const state = {
   agentStatus: "idle",
   agentMessage: "",
   events: [],
-  abortController: null
+  abortController: null,
+  // Set of "tool:args" signatures used in the most recently finished
+  // cycle, kept only to detect a cycle that repeated the previous one
+  // exactly (stuck loop). Reset whenever a new task/block starts.
+  priorCycleSignatures: null,
+  // Rolling digest of what's been tried across cycles in this task,
+  // carried forward as feedback for the next cycle/block.
+  taskDigest: ""
 };
 
 function publicState() {
@@ -85,6 +92,33 @@ function pushEvent(type, actor, message) {
   }
 
   return event;
+}
+
+// Render a tool's raw result into something short and readable for
+// the activity log. Terminal results are JSON {exitCode,stdout,stderr};
+// surface those directly instead of a JSON blob.
+function formatToolResult(name, result) {
+  const raw = String(result);
+
+  if (name === "terminal") {
+    try {
+      const { exitCode, stdout, stderr } = JSON.parse(raw);
+      const out = String(stdout || "").trim();
+      const err = String(stderr || "").trim();
+      let text = `exit ${exitCode}`;
+      if (out) text += ` | stdout: ${out.slice(0, 300)}`;
+      if (err) text += ` | stderr: ${err.slice(0, 300)}`;
+      return text;
+    } catch {
+      // fall through to generic truncation
+    }
+  }
+
+  return raw.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+function callSignature(name, args) {
+  return `${name}:${JSON.stringify(args)}`;
 }
 
 function isForceStopped(error) {
@@ -154,12 +188,20 @@ async function runTaskBlock(task, feedback = "") {
       task,
       feedback,
       cycle: state.cycle,
+      taskId: state.taskId,
       signal: state.abortController.signal,
       onTool: async (name, args, step, model) => {
         pushEvent(
           "tool",
           "agent",
           `${name} ${JSON.stringify(args)} [${model}]`
+        );
+      },
+      onToolResult: async (name, args, toolResult, step, model, repeated) => {
+        pushEvent(
+          repeated ? "tool_repeated" : "tool_result",
+          "agent",
+          formatToolResult(name, toolResult)
         );
       },
       onText: async text => {
@@ -177,6 +219,22 @@ async function runTaskBlock(task, feedback = "") {
       state.agentMessage.slice(0, 5000)
     );
 
+    // Persist what this cycle actually tried, deterministically —
+    // don't rely on the model remembering to call memory_save.
+    if (result.digest) {
+      state.taskDigest = state.taskDigest
+        ? `${state.taskDigest}\n\nCycle ${state.cycle}:\n${result.digest}`
+        : `Cycle ${state.cycle}:\n${result.digest}`;
+
+      memorySave({
+        scope: result.scope || "global",
+        memory_key: `cycle-${state.cycle}-digest`,
+        content: result.digest,
+        importance: 4,
+        tags: ["auto-digest"]
+      }).catch(error => pushEvent("memory_error", "system", error.message));
+    }
+
     if (state.abortController.signal.aborted) {
       await finishStopped();
       return;
@@ -189,8 +247,33 @@ async function runTaskBlock(task, feedback = "") {
       return;
     }
 
-    feedback =
-      "Continue the task from the current workspace. Review your previous work, identify what remains incomplete, fix it, and verify the result.";
+    // Stuck-loop guard: if this cycle called the exact same set of
+    // tools with the exact same arguments as the previous cycle, more
+    // cycles won't help — a fresh cycle just re-explores from scratch.
+    // Stop early and hand it to the Owner instead of burning the rest
+    // of the budget repeating the same steps.
+    const signatures = new Set(
+      (result.toolTrace || []).map(t => callSignature(t.name, t.args))
+    );
+    const samePattern =
+      state.priorCycleSignatures &&
+      signatures.size > 0 &&
+      signatures.size === state.priorCycleSignatures.size &&
+      [...signatures].every(s => state.priorCycleSignatures.has(s));
+    state.priorCycleSignatures = signatures;
+
+    if (samePattern) {
+      pushEvent(
+        "stuck_detected",
+        "system",
+        `Agent repeated the same ${signatures.size} tool call(s) as the previous cycle without new progress. Stopping early at cycle ${state.cycle} instead of burning the remaining budget.`
+      );
+      break;
+    }
+
+    feedback = state.taskDigest
+      ? `${state.taskDigest}\n\nDo not repeat any of the exact calls above. Use their results, try a different approach, or report what is blocking you.`
+      : "Continue the task from the current workspace. Review your previous work, identify what remains incomplete, fix it, and verify the result.";
 
     if (state.cycle >= MAX_CYCLES) break;
   }
@@ -203,12 +286,13 @@ async function runTaskBlock(task, feedback = "") {
   pushEvent(
     "cycle_limit",
     "system",
-    `Reached ${MAX_CYCLES} agent cycles. Owner can continue or stop.`
+    `Reached cycle ${state.cycle}/${MAX_CYCLES}. Owner can continue or stop.`
   );
 }
 
 async function runTask(task, existingTaskId = null) {
   state.abortController = new AbortController();
+  state.priorCycleSignatures = null;
 
   if (!existingTaskId) {
     const dbTask = await createTask(task);
@@ -290,6 +374,8 @@ app.post("/api/task", async (req, res) => {
   state.agentStatus = "idle";
   state.agentMessage = "";
   state.events = [];
+  state.taskDigest = "";
+  state.priorCycleSignatures = null;
 
   runTask(task).catch(async error => {
     console.error(error);
@@ -343,9 +429,13 @@ app.post("/api/owner/decision", async (req, res) => {
     state.abortController = new AbortController();
   }
 
+  state.priorCycleSignatures = null;
+
   runTaskBlock(
     state.task,
-    "Continue from the current workspace. Re-check your previous work and complete anything still missing."
+    state.taskDigest
+      ? `${state.taskDigest}\n\nThe Owner approved another cycle block. Re-check your previous work, do not repeat the exact calls above, and complete anything still missing.`
+      : "Continue from the current workspace. Re-check your previous work and complete anything still missing."
   )
     .catch(async error => {
       if (isForceStopped(error)) return finishStopped();

@@ -165,6 +165,42 @@ button.owner-stop{background:#241611;color:var(--red);border:1px solid #5a2a22}
 .log-line .a.system{color:var(--red)}
 .log-empty{color:var(--muted);font-style:italic}
 
+/* ---------- structured log: cycle groups ---------- */
+.cycle-block{border:1px solid var(--line);border-radius:4px;margin-bottom:8px;background:var(--panel-raised)}
+.cycle-block summary{
+  cursor:pointer;padding:8px 12px;font-family:var(--font-mono);font-size:11.5px;
+  color:var(--muted);letter-spacing:.02em;list-style:none;display:flex;justify-content:space-between;gap:10px;
+}
+.cycle-block summary::-webkit-details-marker{display:none}
+.cycle-block summary::before{content:"\25b8";margin-right:8px;color:var(--brass)}
+.cycle-block[open] summary::before{content:"\25be"}
+.cycle-block summary .cnt{color:var(--ink);opacity:.7}
+.cycle-body{padding:2px 12px 10px;border-top:1px solid var(--line)}
+.call-row{display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:12px}
+.call-row .ico{flex:none;width:14px;text-align:center;color:var(--brass)}
+.call-row.repeated .ico{color:var(--amber)}
+.call-row .name{color:var(--ink);font-weight:600}
+.call-row .args{color:var(--muted);word-break:break-all}
+.result-row{display:flex;gap:8px;padding:1px 0 6px 22px;font-size:11.5px;color:var(--muted)}
+.result-row .ico{flex:none;width:14px;text-align:center}
+.result-row.repeated{color:var(--amber)}
+.agent-text-row{padding:6px 0;border-top:1px dashed var(--line);margin-top:4px;font-size:12.5px;color:var(--ink);white-space:pre-wrap}
+
+/* ---------- top-level event banners ---------- */
+.event-banner{
+  display:flex;gap:10px;align-items:flex-start;padding:8px 12px;border-radius:4px;
+  margin-bottom:8px;font-size:12.5px;border:1px solid var(--line);background:var(--panel-raised);
+}
+.event-banner .t{font-family:var(--font-mono);font-size:10.5px;color:var(--muted);flex:none;padding-top:1px}
+.event-banner .m{white-space:pre-wrap;word-break:break-word}
+.event-banner.info{border-color:var(--line)}
+.event-banner.ok{border-color:#2f4a24;background:#182010}
+.event-banner.ok .m{color:var(--green)}
+.event-banner.warn{border-color:#5a3f14;background:#20180c}
+.event-banner.warn .m{color:var(--amber)}
+.event-banner.danger{border-color:#5a2a22;background:#20130f}
+.event-banner.danger .m{color:var(--red)}
+
 .footnote{font-family:var(--font-mono);font-size:10.5px;color:var(--muted);text-align:center;margin-top:18px;letter-spacing:.06em}
 </style>
 </head>
@@ -229,9 +265,9 @@ button.owner-stop{background:#241611;color:var(--red);border:1px solid #5a2a22}
   </div>
 
   <div class="panel owner" id="owner">
-    <div class="eyebrow">Owner decision required</div>
-    <h3>Cycle budget reached</h3>
-    <p>The agent used its available cycles without reaching a confirmed pass. Choose how to proceed.</p>
+    <div class="eyebrow" id="ownerEyebrow">Owner decision required</div>
+    <h3 id="ownerTitle">Cycle budget reached</h3>
+    <p id="ownerReason">The agent used its available cycles without reaching a confirmed pass. Choose how to proceed.</p>
     <div class="row">
       <button class="owner-continue" onclick="decision('continue')">Continue another block</button>
       <button class="owner-stop" onclick="decision('stop')">Stop</button>
@@ -303,15 +339,82 @@ function renderCycleDial(cycle,max){
   el.innerHTML=html;
 }
 
+const CYCLE_BODY_TYPES=["tool","tool_result","tool_repeated","agent","agent_report"];
+const BANNER_STYLE={
+  task:"info", owner_decision:"ok", completed:"ok",
+  cycle_limit:"warn", stuck_detected:"warn",
+  error:"danger", force_stop:"danger", force_stop_requested:"danger", memory_error:"danger"
+};
+
+function splitToolLine(message){
+  // "name {json-args} [model]" -> {name, args}
+  const m=message.match(/^(\S+)\s+(\{.*\})\s*(?:\[[^\]]*\])?$/);
+  if(!m)return{name:message,args:""};
+  return{name:m[1],args:m[2]};
+}
+
+function groupEvents(events){
+  const blocks=[];
+  let currentCycle=null;
+  for(const e of events){
+    if(e.type==="cycle"){
+      currentCycle={type:"cycle",header:e.message,time:e.time,items:[]};
+      blocks.push(currentCycle);
+    }else if(CYCLE_BODY_TYPES.includes(e.type)&&currentCycle){
+      currentCycle.items.push(e);
+    }else{
+      currentCycle=null;
+      blocks.push({type:"event",event:e});
+    }
+  }
+  return blocks;
+}
+
+function renderCycleBlock(block,isLast){
+  const toolCount=block.items.filter(i=>i.type==="tool").length;
+  const repeatedCount=block.items.filter(i=>i.type==="tool_repeated").length;
+  const rows=block.items.map(item=>{
+    const time=new Date(item.time).toLocaleTimeString();
+    if(item.type==="tool"){
+      const {name,args}=splitToolLine(item.message);
+      return `<div class="call-row"><span class="ico">\u2192</span><span class="name">${escapeHtml(name)}</span><span class="args">${escapeHtml(args)}</span></div>`;
+    }
+    if(item.type==="tool_result"||item.type==="tool_repeated"){
+      const repeated=item.type==="tool_repeated";
+      return `<div class="result-row${repeated?" repeated":""}"><span class="ico">${repeated?"\u27f2":"\u21b3"}</span><span>${escapeHtml(item.message)}</span></div>`;
+    }
+    // agent / agent_report text
+    return `<div class="agent-text-row">${escapeHtml(item.message)}</div>`;
+  }).join("");
+
+  const badge=`<span class="cnt">${toolCount} call${toolCount===1?"":"s"}${repeatedCount?` \u00b7 ${repeatedCount} repeated`:""}</span>`;
+
+  return `<details class="cycle-block"${isLast?" open":""}><summary><span>${escapeHtml(block.header)}</span>${badge}</summary><div class="cycle-body">${rows||'<div class="log-empty">No tool calls yet.</div>'}</div></details>`;
+}
+
+function renderEventBanner(e){
+  const style=BANNER_STYLE[e.type]||"info";
+  const time=new Date(e.time).toLocaleTimeString();
+  const icon={ok:"\u2713",warn:"\u26a0",danger:"\u2715",info:"\u2022"}[style];
+  return `<div class="event-banner ${style}"><span class="t">${escapeHtml(time)}</span><span class="m">${icon} ${escapeHtml(e.actor)} \u00b7 ${escapeHtml(e.type)}: ${escapeHtml(e.message)}</span></div>`;
+}
+
 function renderLog(events){
   const el=document.getElementById("log");
   if(!events||events.length===0){el.innerHTML='<div class="log-empty">No activity yet.</div>';return}
-  el.innerHTML=events.map(e=>{
-    const time=new Date(e.time).toLocaleTimeString();
-    const actorClass=["agent","owner","system"].includes(e.actor)?e.actor:"system";
-    return `<div class="log-line"><span class="t">${escapeHtml(time)}</span><span class="a ${actorClass}">${escapeHtml(e.actor)}</span><span class="m">${escapeHtml(e.type)}: ${escapeHtml(e.message)}</span></div>`;
+  const blocks=groupEvents(events);
+  el.innerHTML=blocks.map((b,i)=>{
+    const isLast=i===blocks.length-1;
+    return b.type==="cycle"?renderCycleBlock(b,isLast):renderEventBanner(b.event);
   }).join("");
   el.scrollTop=el.scrollHeight;
+}
+
+function latestReasonEvent(events){
+  for(let i=events.length-1;i>=0;i--){
+    if(["stuck_detected","cycle_limit"].includes(events[i].type))return events[i];
+  }
+  return null;
 }
 
 async function refresh(){
@@ -331,6 +434,16 @@ async function refresh(){
       (data.agentMessage?escapeHtml(data.agentMessage.slice(0,220)):'<span class="k">—</span>');
 
     document.getElementById("owner").style.display=data.awaitingOwner?"block":"none";
+    if(data.awaitingOwner){
+      const reasonEvent=latestReasonEvent(data.events||[]);
+      if(reasonEvent?.type==="stuck_detected"){
+        document.getElementById("ownerTitle").textContent="Agent looks stuck";
+        document.getElementById("ownerReason").textContent=reasonEvent.message;
+      }else{
+        document.getElementById("ownerTitle").textContent="Cycle budget reached";
+        document.getElementById("ownerReason").textContent=reasonEvent?.message||"The agent used its available cycles without reaching a confirmed pass. Choose how to proceed.";
+      }
+    }
     document.getElementById("forceStop").style.display=data.forceStoppable?"inline-block":"none";
 
     renderLog(data.events);
